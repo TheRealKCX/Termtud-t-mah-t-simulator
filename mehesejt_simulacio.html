@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Méhsejt Szimuláció</title>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
+</head>
+<body>
+    <h1>Méhsejt Szimuláció</h1>
+    <div id="output">Loading...</div>
+    <script>
+        async function main() {
+            let pyodide = await loadPyodide();
+            await pyodide.loadPackage("micropip");
+            await pyodide.runPythonAsync(`
+                import micropip
+                await micropip.install('pygame')
+            `);
+
+            // Embed the Python code
+            const pythonCode = `
+import asyncio
+import pygame
+import math
+import platform
+from dataclasses import dataclass
+from typing import List, Tuple, Dict
+
+# Képernyő beállítások
+WIDTH = 800
+HEIGHT = 600
+FPS = 60
+CELL_SIZE = 50
+CIRCLE_RADIUS = 45  # Smaller radius for circles
+
+# Színek
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+RED = (255, 0, 0)
+GREEN = (0, 255, 0)
+YELLOW = (255, 255, 0)
+GREY = (128, 128, 128)  # For steel ball
+
+# Forma definíció
+@dataclass
+class Shape:
+    sides: int  # 0 for circle
+    color: tuple
+    efficiency: float = None
+    points_cache: List[Tuple[float, float]] = None
+
+    def calculate_points(self, x: float, y: float, rotate_180: bool = False) -> List[Tuple[float, float]]:
+        if self.sides == 0:  # Circle
+            return [(x, y)]  # Return center point for circle
+        points = []
+        rotation = math.radians(45) if self.sides == 4 else 0
+        for i in range(self.sides):
+            angle = 2 * math.pi * i / self.sides - math.pi / 2 + rotation
+            px = CELL_SIZE * math.cos(angle)
+            py = CELL_SIZE * math.sin(angle)
+            points.append((px, py))
+        return [(x + px, y + py) for px, py in points]
+
+# Formák tulajdonságai
+SHAPES = {
+    "kör": Shape(sides=0, color=RED),
+    "négyzet": Shape(sides=4, color=GREEN),
+    "hatszög": Shape(sides=6, color=YELLOW)
+}
+
+# Gombok
+BUTTON_WIDTH = 200
+BUTTON_HEIGHT = 80
+BUTTON_MARGIN = 20
+BUTTON_Y_START = 300
+BUTTONS = {
+    "kör": pygame.Rect(300, BUTTON_Y_START, BUTTON_WIDTH, BUTTON_HEIGHT),
+    "négyzet": pygame.Rect(300, BUTTON_Y_START + BUTTON_HEIGHT + BUTTON_MARGIN, BUTTON_WIDTH, BUTTON_HEIGHT),
+    "hatszög": pygame.Rect(300, BUTTON_Y_START + 2 * (BUTTON_HEIGHT + BUTTON_MARGIN), BUTTON_WIDTH, BUTTON_HEIGHT)
+}
+RESET_BUTTON = pygame.Rect(WIDTH - 120, 10, 100, 40)
+DROP_BALL_BUTTON = pygame.Rect(WIDTH - 290, 10, 150, 50)  # Bigger and wider button
+
+# Hatékonyság kiszámítása
+def calculate_efficiency(sides: int, side_length: float) -> float:
+    if sides == 0:  # Circle
+        area = math.pi * (side_length) ** 2
+        perimeter = 2 * math.pi * side_length
+    elif sides == 4:
+        area = side_length ** 2
+        perimeter = 4 * side_length
+    elif sides == 6:
+        area = (3 * math.sqrt(3) / 2) * side_length ** 2
+        perimeter = 6 * side_length
+    else:
+        return 0
+    return area / perimeter
+
+# Inicializálás
+for shape in SHAPES.values():
+    shape.efficiency = calculate_efficiency(shape.sides, CELL_SIZE)
+
+# Pygame inicializálása
+pygame.init()
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Méhsejt Szimuláció")
+clock = pygame.time.Clock()
+font = pygame.font.SysFont("arial", 24)
+large_font = pygame.font.SysFont("arial", 36)  # Larger font for messages
+
+# Rács pozíciók
+HEX_OFFSET_X = CELL_SIZE * math.sqrt(3)
+HEX_OFFSET_Y = CELL_SIZE * 1.5
+HEX_START_X = WIDTH // 2
+HEX_START_Y = HEIGHT // 2
+SQUARE_OFFSET = CELL_SIZE * 2
+SQUARE_START_X = WIDTH // 2
+SQUARE_START_Y = HEIGHT // 2
+# Kör rács
+CIRCLE_OFFSET_X = CELL_SIZE * math.sqrt(3)
+CIRCLE_OFFSET_Y = CELL_SIZE * 1.5
+CIRCLE_START_X = WIDTH // 2
+CIRCLE_START_Y = HEIGHT // 2
+
+class Simulation:
+    def __init__(self):
+        self.state = "start_screen"
+        self.selected_shape = None
+        self.placed_shapes: List[Tuple[float, float, str, bool]] = []  # x, y, shape_type, rotate_180
+        self.running = True
+        # Animation variables
+        self.balls = []  # List of (x, y, speed) for multiple balls
+        self.ball_radius = 20
+        self.message = ""  # Success message
+
+    def get_circle_grid_position(self, x: float, y: float) -> Tuple[float, float]:
+        """A legközelebbi kör rácspozíciót adja vissza."""
+        col = round((x - CIRCLE_START_X) / CIRCLE_OFFSET_X)
+        row = round((y - CIRCLE_START_Y) / CIRCLE_OFFSET_Y)
+        grid_x = CIRCLE_START_X + col * CIRCLE_OFFSET_X
+        grid_y = CIRCLE_START_Y + row * CIRCLE_OFFSET_Y
+        if row % 2 != 0:
+            grid_x += CIRCLE_OFFSET_X / 2
+        return grid_x, grid_y
+
+    def find_nearest_circle_position(self, x: float, y: float) -> Tuple[float, float]:
+        """Megkeresi a legközelebbi érvényes kör pozíciót, amely szomszédos egy meglévővel."""
+        grid_x, grid_y = self.get_circle_grid_position(x, y)
+        if not any(shape_type == "kör" for _, _, shape_type, _ in self.placed_shapes):
+            return grid_x, grid_y
+        possible_positions = []
+        for px, py, shape_type, _ in self.placed_shapes:
+            if shape_type != "kör":
+                continue
+            offsets = [
+                (CIRCLE_OFFSET_X, 0), (-CIRCLE_OFFSET_X, 0),
+                (CIRCLE_OFFSET_X / 2, CIRCLE_OFFSET_Y),
+                (CIRCLE_OFFSET_X / 2, -CIRCLE_OFFSET_Y),
+                (-CIRCLE_OFFSET_X / 2, CIRCLE_OFFSET_Y),
+                (-CIRCLE_OFFSET_X / 2, -CIRCLE_OFFSET_Y)
+            ]
+            for dx, dy in offsets:
+                possible_positions.append((px + dx, py + dy))
+        closest_pos = None
+        min_dist = float('inf')
+        for pos_x, pos_y in possible_positions:
+            if not any(math.isclose(pos_x, ex_x, abs_tol=1e-2) and math.isclose(pos_y, ex_y, abs_tol=1e-2)
+                       for ex_x, ex_y, _, _ in self.placed_shapes):
+                dist = math.hypot(pos_x - x, pos_y - y)
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_pos = (pos_x, pos_y)
+        return closest_pos if closest_pos else (grid_x, grid_y)
+
+    def get_hex_grid_position(self, x: float, y: float) -> Tuple[float, float]:
+        col = round((x - HEX_START_X) / HEX_OFFSET_X)
+        row = round((y - HEX_START_Y) / HEX_OFFSET_Y)
+        grid_x = HEX_START_X + col * HEX_OFFSET_X
+        grid_y = HEX_START_Y + row * HEX_OFFSET_Y
+        if row % 2 != 0:
+            grid_x += HEX_OFFSET_X / 2
+        return grid_x, grid_y
+
+    def find_nearest_hex_position(self, x: float, y: float) -> Tuple[float, float]:
+        grid_x, grid_y = self.get_hex_grid_position(x, y)
+        if not any(shape_type == "hatszög" for _, _, shape_type, _ in self.placed_shapes):
+            return grid_x, grid_y
+        possible_positions = []
+        for px, py, shape_type, _ in self.placed_shapes:
+            if shape_type != "hatszög":
+                continue
+            offsets = [
+                (HEX_OFFSET_X, 0), (-HEX_OFFSET_X, 0),
+                (HEX_OFFSET_X / 2, HEX_OFFSET_Y),
+                (HEX_OFFSET_X / 2, -HEX_OFFSET_Y),
+                (-HEX_OFFSET_X / 2, HEX_OFFSET_Y),
+                (-HEX_OFFSET_X / 2, -HEX_OFFSET_Y)
+            ]
+            for dx, dy in offsets:
+                possible_positions.append((px + dx, py + dy))
+        closest_pos = None
+        min_dist = float('inf')
+        for pos_x, pos_y in possible_positions:
+            if not any(math.isclose(pos_x, ex_x, abs_tol=1e-2) and math.isclose(pos_y, ex_y, abs_tol=1e-2)
+                       for ex_x, ex_y, _, _ in self.placed_shapes):
+                dist = math.hypot(pos_x - x, pos_y - y)
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_pos = (pos_x, pos_y)
+        return closest_pos if closest_pos else (grid_x, grid_y)
+
+    def get_square_grid_position(self, x: float, y: float) -> Tuple[float, float]:
+        col = round((x - SQUARE_START_X) / SQUARE_OFFSET)
+        row = round((y - SQUARE_START_Y) / SQUARE_OFFSET)
+        grid_x = SQUARE_START_X + col * SQUARE_OFFSET
+        grid_y = SQUARE_START_Y + row * SQUARE_OFFSET
+        return grid_x, grid_y
+
+    def find_nearest_square_position(self, x: float, y: float) -> Tuple[float, float]:
+        grid_x, grid_y = self.get_square_grid_position(x, y)
+        if not any(shape_type == "négyzet" for _, _, shape_type, _ in self.placed_shapes):
+            return grid_x, grid_y
+        possible_positions = []
+        diagonal = CELL_SIZE * math.sqrt(2)
+        for px, py, shape_type, _ in self.placed_shapes:
+            if shape_type != "négyzet":
+                continue
+            offsets = [
+                (diagonal, 0),
+                (-diagonal, 0),
+                (0, diagonal),
+                (0, -diagonal)
+            ]
+            for dx, dy in offsets:
+                possible_positions.append((px + dx, py + dy))
+        closest_pos = None
+        min_dist = float('inf')
+        for pos_x, pos_y in possible_positions:
+            if not any(math.isclose(pos_x, ex_x, abs_tol=1e-2) and math.isclose(pos_y, ex_y, abs_tol=1e-2)
+                       for ex_x, ex_y, _, _ in self.placed_shapes):
+                dist = math.hypot(pos_x - x, pos_y - y)
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_pos = (pos_x, pos_y)
+        return closest_pos if closest_pos else (grid_x, grid_y)
+
+    def is_position_occupied(self, grid_x: float, grid_y: float, new_points: List[Tuple[float, float]], shape_type: str) -> bool:
+        return any(math.isclose(grid_x, ex_x, abs_tol=1e-2) and math.isclose(grid_y, ex_y, abs_tol=1e-2)
+                   for ex_x, ex_y, ex_shape, _ in self.placed_shapes if ex_shape == shape_type)
+
+    def draw_shape(self, screen: pygame.Surface, x: float, y: float, shape_type: str, rotate_180: bool = False):
+        if shape_type == "kör":
+            pygame.draw.circle(screen, SHAPES[shape_type].color, (x, y), CIRCLE_RADIUS)
+            pygame.draw.circle(screen, BLACK, (x, y), CIRCLE_RADIUS, width=5)
+            return [(x, y)]
+        points = SHAPES[shape_type].calculate_points(x, y, rotate_180)
+        pygame.draw.polygon(screen, SHAPES[shape_type].color, points)
+        pygame.draw.polygon(screen, BLACK, points, width=5)
+        return points
+
+    def draw_start_screen(self, screen: pygame.Surface):
+        screen.fill(WHITE)
+        title = font.render("Üdvözöljük a Méhsejt Szimulációban!", True, BLACK)
+        prompt = font.render("Válasszon egy formát:", True, BLACK)
+        credit = font.render("Credit: Kevin", True, BLACK)
+        screen.blit(title, (WIDTH // 2 - title.get_width() // 2, 100))
+        screen.blit(prompt, (WIDTH // 2 - prompt.get_width() // 2, 200))
+        screen.blit(credit, (WIDTH // 2 - prompt.get_width() // 0.57, 35))
+        for shape, rect in BUTTONS.items():
+            pygame.draw.rect(screen, SHAPES[shape].color, rect)
+            text = font.render(shape.capitalize(), True, BLACK)
+            screen.blit(text, (rect.x + rect.width // 2 - text.get_width() // 2,
+                              rect.y + rect.height // 2 - text.get_height() // 2))
+        pygame.display.flip()
+
+    def draw_simulation_screen(self, screen: pygame.Surface):
+        screen.fill(WHITE)
+        text = font.render(f"Kiválasztott forma: {self.selected_shape.capitalize()}", True, BLACK)
+        screen.blit(text, (20, 20))
+        pygame.draw.rect(screen, RED, RESET_BUTTON)
+        reset_text = font.render("Reset", True, WHITE)
+        screen.blit(reset_text, (RESET_BUTTON.x + 20, RESET_BUTTON.y + 10))
+        pygame.draw.rect(screen, GREY, DROP_BALL_BUTTON)
+        drop_text = font.render("Golyó Dobása", True, WHITE)
+        screen.blit(drop_text, (DROP_BALL_BUTTON.x + (DROP_BALL_BUTTON.width - drop_text.get_width()) // 2,
+                                DROP_BALL_BUTTON.y + (DROP_BALL_BUTTON.height - drop_text.get_height()) // 2))
+        y_offset = 70
+        shape_count = len(self.placed_shapes)
+        count_text = f"Elhelyezett formák: {shape_count}"
+        screen.blit(font.render(count_text, True, BLACK), (20, y_offset + 4))
+        if self.message:
+            message_text = large_font.render(self.message, True, BLACK)
+            screen.blit(message_text, (WIDTH // 2 - message_text.get_width() // 2, HEIGHT // 2))
+        for x, y, shape_type, rotate_180 in self.placed_shapes:
+            self.draw_shape(screen, x, y, shape_type, rotate_180)
+        pygame.display.flip()
+
+    def update_animation(self, screen: pygame.Surface):
+        screen.fill(WHITE)
+        text = font.render(f"Kiválasztott forma: {self.selected_shape.capitalize()}", True, BLACK)
+        screen.blit(text, (20, 20))
+        pygame.draw.rect(screen, RED, RESET_BUTTON)
+        reset_text = font.render("Reset", True, WHITE)
+        screen.blit(reset_text, (RESET_BUTTON.x + 20, RESET_BUTTON.y + 10))
+        pygame.draw.rect(screen, GREY, DROP_BALL_BUTTON)
+        drop_text = font.render("Golyó Dobása", True, WHITE)
+        screen.blit(drop_text, (DROP_BALL_BUTTON.x + (DROP_BALL_BUTTON.width - drop_text.get_width()) // 2,
+                                DROP_BALL_BUTTON.y + (DROP_BALL_BUTTON.height - drop_text.get_height()) // 2))
+        y_offset = 70
+        shape_count = len(self.placed_shapes)
+        count_text = f"Elhelyezett formák: {shape_count}"
+        screen.blit(font.render(count_text, True, BLACK), (20, y_offset + 4))
+
+        # Draw all shapes
+        for x, y, shape_type, rotate_180 in self.placed_shapes:
+            self.draw_shape(screen, x, y, shape_type, rotate_180)
+
+        # Update and draw balls
+        balls_to_remove = []
+        for i, (ball_x, ball_y, speed) in enumerate(self.balls):
+            # Update position
+            ball_y += speed
+            self.balls[i] = (ball_x, ball_y, speed)
+
+            # Draw ball
+            pygame.draw.circle(screen, GREY, (int(ball_x), int(ball_y)), self.ball_radius)
+            pygame.draw.circle(screen, BLACK, (int(ball_x), int(ball_y)), self.ball_radius, width=2)
+
+            # Check for collisions
+            for j, (x, y, shape_type, rotate_180) in enumerate(self.placed_shapes[:]):
+                distance = math.hypot(ball_x - x, ball_y - y)
+                if distance < CELL_SIZE + self.ball_radius:
+                    if shape_type in ["kör", "négyzet"]:
+                        self.placed_shapes.pop(j)
+                    elif shape_type == "hatszög":
+                        self.balls[i] = (ball_x, ball_y, -speed)  # Bounce by reversing speed
+                    break
+
+            # Mark ball for removal if it exits screen
+            if ball_y > HEIGHT + self.ball_radius or ball_y < -self.ball_radius:
+                balls_to_remove.append(i)
+
+        # Remove balls that have exited
+        for index in sorted(balls_to_remove, reverse=True):
+            self.balls.pop(index)
+
+        # Check if animation is complete
+        if not self.balls:
+            self.state = "simulation"
+            self.balls = []  # Clear balls
+            # Set success message
+            self.message = "Sikerült megtartani az alakzatokat!" if any(
+                shape_type == "hatszög" for _, _, shape_type, _ in self.placed_shapes
+            ) else "Nem sikerült megtartani az alakzatokat!"
+
+        pygame.display.flip()
+
+    def handle_input(self, event: pygame.event.Event):
+        if event.type == pygame.QUIT:
+            self.running = False
+        elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.FINGERDOWN):
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                x, y = event.pos
+            else:
+                x = max(0, min(event.x * WIDTH, WIDTH))
+                y = max(0, min(event.y * HEIGHT, HEIGHT))
+            if self.state == "start_screen":
+                for shape, rect in BUTTONS.items():
+                    if rect.collidepoint(x, y):
+                        self.selected_shape = shape
+                        self.state = "simulation"
+                        self.placed_shapes.clear()
+                        self.balls = []  # Clear balls
+                        self.message = ""  # Clear message
+                        self.draw_simulation_screen(screen)
+            elif self.state == "simulation":
+                if RESET_BUTTON.collidepoint(x, y):
+                    self.state = "start_screen"
+                    self.selected_shape = None
+                    self.placed_shapes.clear()
+                    self.balls = []  # Clear balls
+                    self.message = ""  # Clear message
+                    self.draw_start_screen(screen)
+                    return
+                if DROP_BALL_BUTTON.collidepoint(x, y):
+                    if self.placed_shapes:  # Only start animation if shapes exist
+                        self.state = "animation"
+                        # Initialize 8 balls across the screen with faster speed
+                        self.balls = [(x, 0, 10) for x in range(50, WIDTH, 100)]  # 8 balls at x=50, 150, ..., 750
+                        return
+                if self.selected_shape == "hatszög":
+                    grid_x, grid_y = self.find_nearest_hex_position(x, y)
+                    rotate_180 = False
+                elif self.selected_shape == "négyzet":
+                    grid_x, grid_y = self.find_nearest_square_position(x, y)
+                    rotate_180 = False
+                else:  # kör
+                    grid_x, grid_y = self.find_nearest_circle_position(x, y)
+                    rotate_180 = False
+                if (0 < grid_x < WIDTH - CELL_SIZE and 50 < grid_y < HEIGHT - CELL_SIZE):
+                    new_points = self.draw_shape(screen, grid_x, grid_y, self.selected_shape, rotate_180)
+                    if not self.is_position_occupied(grid_x, grid_y, new_points, self.selected_shape):
+                        self.placed_shapes.append((grid_x, grid_y, self.selected_shape, rotate_180))
+
+    def update(self):
+        for event in pygame.event.get():
+            self.handle_input(event)
+        if self.state == "start_screen":
+            self.draw_start_screen(screen)
+        elif self.state == "simulation":
+            self.draw_simulation_screen(screen)
+        elif self.state == "animation":
+            self.update_animation(screen)
+
+async def main():
+    sim = Simulation()
+    sim.draw_start_screen(screen)
+    while sim.running:
+        sim.update()
+        await asyncio.sleep(1.0 / FPS)
+    pygame.quit()
+
+if platform.system() == "Emscripten":
+    asyncio.ensure_future(main())
+else:
+    if __name__ == "__main__":
+        asyncio.run(main())
+`;
+
+            // Write the Python code to a file in Pyodide's virtual filesystem
+            pyodide.FS.writeFile("/mehesejt_simulacio_kor.py", pythonCode, { encoding: "utf-8" });
+
+            // Run the Python script
+            await pyodide.runPythonAsync(`
+                import sys
+                sys.path.append("/")
+                import mehesejt_simulacio_kor
+            `);
+
+            document.getElementById("output").innerText = "Simulation is running...";
+        }
+
+        main().catch(err => {
+            document.getElementById("output").innerText = "Error: " + err.message;
+        });
+    </script>
+</body>
+</html>
